@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import random
 import time
@@ -66,52 +67,64 @@ def type_with_delay(element, text, delay=0.5):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("必应自动刷积分助手 v1.3  快感谢白鲨大人！网上工具都用不了于是我做了这个")
-        root.geometry("440x450")  # 稍微加高加宽
+        root.title("必应自动刷积分助手v2.0")
+        root.geometry("440x450")
         root.resizable(False, False)
 
         self.status_var = tk.StringVar()
-        self.status_var.set("就绪，请先登录账号")
-        tk.Label(root, textvariable=self.status_var, fg="blue", relief="sunken", 
+        tk.Label(root, textvariable=self.status_var, fg="blue", relief="sunken",
                  anchor="w", padx=5).pack(fill="x", padx=10, pady=5)
 
-        # 按钮区域（使用网格布局，分两行）
+        # 按钮区域
         btn_frame = tk.Frame(root)
         btn_frame.pack(pady=10)
 
-        # ---- 第1行：固定按钮 ----
-        self.btn_login = tk.Button(btn_frame, text="🔑 1. 登录账号", command=self.login_task, 
+        # 第1行：固定按钮
+        self.btn_login = tk.Button(btn_frame, text="🔑 1. 登录账号", command=self.login_task,
                                    width=14, bg="#FFD700")
         self.btn_login.grid(row=0, column=0, padx=4, pady=4)
 
-        self.btn_20 = tk.Button(btn_frame, text="▶ 20次", 
-                                command=lambda: self.start_search(20), width=8, state="disabled")
+        self.btn_20 = tk.Button(btn_frame, text="▶ 20次",
+                                command=lambda: self.start_search(20), width=8)
         self.btn_20.grid(row=0, column=1, padx=4, pady=4)
 
-        self.btn_30 = tk.Button(btn_frame, text="▶ 30次", 
-                                command=lambda: self.start_search(30), width=8, state="disabled")
+        self.btn_30 = tk.Button(btn_frame, text="▶ 30次",
+                                command=lambda: self.start_search(30), width=8)
         self.btn_30.grid(row=0, column=2, padx=4, pady=4)
 
-        # ---- 第2行：自定义次数 ----
+        # 第2行：自定义次数
         tk.Label(btn_frame, text="自定义次数:", font=("微软雅黑", 10)).grid(row=1, column=0, padx=4, pady=4, sticky="e")
-        
         self.custom_entry = tk.Entry(btn_frame, width=10)
         self.custom_entry.grid(row=1, column=1, padx=4, pady=4)
-        self.custom_entry.insert(0, "5")  # 默认显示5次，方便测试
+        self.custom_entry.insert(0, "5")
 
-        self.btn_custom = tk.Button(btn_frame, text="▶ 自定义搜索", 
-                                    command=self.start_custom_search, width=12, state="disabled")
+        self.btn_custom = tk.Button(btn_frame, text="▶ 自定义搜索",
+                                    command=self.start_custom_search, width=12)
         self.btn_custom.grid(row=1, column=2, padx=4, pady=4)
 
         # 日志显示框
         self.log_area = scrolledtext.ScrolledText(root, height=14, state='disabled', wrap=tk.WORD)
         self.log_area.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # 文件检查
+        # ---------- 文件检查 ----------
         if not os.path.exists(DRIVER_PATH):
             self.log("❌ 错误：找不到 msedgedriver.exe，请放在程序同目录下！")
         if not os.path.exists(DICT_PATH):
             self.log("⚠️ 警告：找不到 dictionary.txt，请创建并填入搜索词。")
+
+        # ---------- ★ 启动时检测 user_data 目录 ----------
+        if os.path.exists(USER_DATA_DIR) and os.listdir(USER_DATA_DIR):
+            self.btn_20.config(state="normal")
+            self.btn_30.config(state="normal")
+            self.btn_custom.config(state="normal")
+            self.update_status("检测到用户数据目录，默认已经登录。如果打开浏览器后没有账号信息请重新登录。")
+            self.log("ℹ️ 检测到用户数据目录，默认已经登录。如果打开浏览器后没有账号信息请重新登录。")
+        else:
+            self.btn_20.config(state="disabled")
+            self.btn_30.config(state="disabled")
+            self.btn_custom.config(state="disabled")
+            self.update_status("未登录，请点击“登录账号”")
+            self.log("ℹ️ user_data 目录为空或不存在，需要登录。")
 
     def log(self, msg):
         self.log_area.config(state='normal')
@@ -133,27 +146,99 @@ class App:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的正整数（如 1、10、50）！")
 
-    # ---------- 登录 ----------
+    # ---------- 登录（基于真实Bing页面结构：id_s 和 id_n） ----------
     def login_task(self):
         if not os.path.exists(DRIVER_PATH):
             messagebox.showerror("错误", "找不到 msedgedriver.exe")
             return
         self.btn_login.config(state="disabled")
         self.update_status("正在打开浏览器，请手动登录...")
-        
+        self.log("🔑 浏览器已打开，请手动输入账号密码登录。")
+
         def login_work():
             driver = None
             try:
                 driver = init_driver(headless=False, use_mobile_ua=False)
                 driver.get("https://cn.bing.com/")
-                self.log("✅ 浏览器已打开，请在页面登录微软账户...")
-                messagebox.showinfo("操作提示", "请在打开的 Edge 中登录账号，登录成功后点击“确定”。")
-                self.log("✅ 登录流程完成，状态已保存。")
-                self.update_status("已登录，可以开始搜索")
-                # 启用所有搜索按钮
-                self.root.after(0, lambda: self.btn_20.config(state="normal"))
-                self.root.after(0, lambda: self.btn_30.config(state="normal"))
-                self.root.after(0, lambda: self.btn_custom.config(state="normal"))
+                # 等待身份标识容器加载
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "id_h")))
+                self.log("✅ 页面已加载，开始检测登录状态...")
+
+                # ---------- 辅助检测函数 ----------
+                def is_login_button_visible():
+                    """返回 True 表示“登录”按钮可见（未登录）"""
+                    try:
+                        login_span = driver.find_element(By.ID, "id_s")
+                        return login_span.is_displayed()
+                    except:
+                        return False
+
+                def has_username():
+                    """返回 True 表示已显示用户名（已登录）"""
+                    try:
+                        name_span = driver.find_element(By.ID, "id_n")
+                        return name_span.text.strip() != ""
+                    except:
+                        return False
+
+                # ---------- 第一阶段：等待“登录”按钮出现（最多30秒） ----------
+                login_appeared = False
+                start = time.time()
+                while time.time() - start < 30:
+                    if is_login_button_visible():
+                        login_appeared = True
+                        self.log("✅ 检测到“登录”按钮，等待登录完成...")
+                        break
+                    time.sleep(0.5)
+
+                if not login_appeared:
+                    # 如果30秒内没出现“登录”按钮，检查是否已登录（有用户名）
+                    if has_username():
+                        self.log("✅ 未检测到“登录”按钮，但已有用户名，视为已登录。")
+                    else:
+                        self.log("⏰ 未检测到“登录”按钮且无用户名，可能页面异常。")
+                        answer = messagebox.askyesno("登录确认", "未检测到登录状态。如果您已经登录，请点击“是”；否则点击“否”重新尝试。")
+                        if not answer:
+                            self.log("❌ 用户取消登录")
+                            self.update_status("登录取消")
+                            return
+                    logged_in = True  # 用户确认或已有用户名
+                else:
+                    # ---------- 第二阶段：等待“登录”按钮消失（最多5分钟） ----------
+                    logged_in = False
+                    start_time = time.time()
+                    timeout = 300  # 5分钟
+                    while time.time() - start_time < timeout:
+                        if not is_login_button_visible() and has_username():
+                            logged_in = True
+                            self.log("✅ “登录”按钮已消失，且检测到用户名，登录成功！")
+                            break
+                        time.sleep(1)
+
+                    if not logged_in:
+                        # 超时后询问用户
+                        answer = messagebox.askyesno("登录确认", "登录按钮仍未消失。如果您已经登录，请点击“是”；否则点击“否”重新尝试。")
+                        if answer:
+                            logged_in = True
+                        else:
+                            self.log("❌ 用户取消登录")
+                            self.update_status("登录取消")
+                            return
+
+                # ---------- 处理登录成功 ----------
+                if logged_in:
+                    self.log("✅ 登录流程完成，浏览器即将关闭。")
+                    self.update_status("已登录，可以开始搜索")
+                    self.root.after(0, lambda: self.btn_20.config(state="normal"))
+                    self.root.after(0, lambda: self.btn_30.config(state="normal"))
+                    self.root.after(0, lambda: self.btn_custom.config(state="normal"))
+                    if driver:
+                        driver.quit()
+                        driver = None
+                        self.log("✅ 浏览器已关闭。")
+                else:
+                    self.log("❌ 登录未成功，请重试")
+                    self.update_status("登录失败")
             except Exception as e:
                 self.log(f"❌ 登录出错: {e}")
                 self.update_status("登录失败")
@@ -161,7 +246,7 @@ class App:
                 if driver:
                     driver.quit()
                 self.root.after(0, lambda: self.btn_login.config(state="normal"))
-        
+
         threading.Thread(target=login_work, daemon=True).start()
 
     # ---------- 搜索（桌面UA，逐字输入） ----------
