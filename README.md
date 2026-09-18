@@ -27,7 +27,7 @@ python -m pip install -r requirements.txt
 
 # 本程序可以把窗口挂在后台刷，前台可以打游戏，刷完了会有窗口提示
 
-# 请自行下载浏览器驱动
+# 驱动可自行下载，也可打开app进行自动更新
 [edge驱动下载地址](https://developer.microsoft.com/zh-cn/microsoft-edge/tools/webdriver/?form=MA13LH&cs=1026196607)
 
 [chrome驱动（114以前）](https://chromedriver.storage.googleapis.com/index.html)

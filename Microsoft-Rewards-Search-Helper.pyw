@@ -5,6 +5,13 @@ import time
 import threading
 import tkinter as tk
 from tkinter import scrolledtext, messagebox, ttk
+import urllib.request
+import json
+import zipfile
+import shutil
+import tempfile
+import re
+import subprocess
 
 from selenium import webdriver
 from selenium.webdriver.edge.options import Options as EdgeOptions
@@ -28,6 +35,366 @@ os.makedirs(USER_DATA_DIR_EDGE, exist_ok=True)
 os.makedirs(USER_DATA_DIR_CHROME, exist_ok=True)
 
 DICT_PATH = os.path.join(BASE_DIR, "dictionary.txt")
+
+# Chrome for Testing JSON API
+CFT_LAST_KNOWN_GOOD_URL = (
+    "https://googlechromelabs.github.io/chrome-for-testing/"
+    "last-known-good-versions-with-downloads.json"
+)
+
+# Edge WebDriver 下载地址模板
+# 注意：msedgedriver.azureedge.net 已下线（DNS 无法解析），不再使用
+EDGE_DRIVER_DOWNLOAD_URLS = [
+    "https://msedgedriver.microsoft.com/{version}/edgedriver_win64.zip",
+]
+
+
+# ========== 版本号比较工具 ==========
+def _version_tuple(v):
+    """把版本号字符串转成可比较的整数元组，例如 '153.0.4234.46' -> (153, 0, 4234, 46)"""
+    if not v:
+        return None
+    try:
+        parts = re.findall(r"\d+", str(v))
+        if not parts:
+            return None
+        return tuple(int(x) for x in parts)
+    except Exception:
+        return None
+
+
+def _compare_versions(a, b):
+    """
+    比较版本号 a 与 b。
+    返回 1：a > b
+    返回 0：a == b
+    返回 -1：a < b
+    返回 None：无法比较
+    """
+    ta = _version_tuple(a)
+    tb = _version_tuple(b)
+    if ta is None or tb is None:
+        return None
+    # 补零对齐长度
+    length = max(len(ta), len(tb))
+    ta = ta + (0,) * (length - len(ta))
+    tb = tb + (0,) * (length - len(tb))
+    if ta > tb:
+        return 1
+    elif ta < tb:
+        return -1
+    else:
+        return 0
+
+
+# ========== 驱动版本检测与更新 ==========
+def _run_no_window(cmd, timeout=10):
+    """在 Windows 上静默运行命令，不弹出黑框"""
+    startupinfo = None
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return subprocess.run(
+        cmd, capture_output=True, text=True, timeout=timeout,
+        startupinfo=startupinfo
+    )
+
+
+def get_chrome_driver_version(driver_path):
+    """读取本地 ChromeDriver 版本号"""
+    if not os.path.exists(driver_path):
+        return None
+    try:
+        result = _run_no_window([driver_path, "--version"])
+        output = (result.stdout or "") + (result.stderr or "")
+        match = re.search(r"ChromeDriver\s+([\d.]+)", output)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def get_edge_driver_version(driver_path):
+    """读取本地 EdgeDriver 版本号"""
+    if not os.path.exists(driver_path):
+        return None
+    try:
+        result = _run_no_window([driver_path, "--version"])
+        output = (result.stdout or "") + (result.stderr or "")
+        match = re.search(r"WebDriver\s+([\d.]+)", output)
+        return match.group(1) if match else None
+    except Exception:
+        return None
+
+
+def get_local_browser_version(browser):
+    """通过注册表读取本地安装的浏览器版本号"""
+    try:
+        import winreg
+        if browser == "edge":
+            # 尝试 1：HKCU BLBeacon
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Edge\BLBeacon"
+                )
+                version, _ = winreg.QueryValueEx(key, "version")
+                winreg.CloseKey(key)
+                return version
+            except FileNotFoundError:
+                pass
+            # 尝试 2：HKLM EdgeUpdate 客户端信息
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"Software\WOW6432Node\Microsoft\EdgeUpdate\Clients"
+                    r"\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}"
+                )
+                version, _ = winreg.QueryValueEx(key, "pv")
+                winreg.CloseKey(key)
+                return version
+            except Exception:
+                pass
+            # 尝试 3：HKLM Edge BLBeacon
+            try:
+                key = winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    r"Software\Microsoft\Edge\BLBeacon"
+                )
+                version, _ = winreg.QueryValueEx(key, "version")
+                winreg.CloseKey(key)
+                return version
+            except Exception:
+                pass
+            return None
+        elif browser == "chrome":
+            for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for path in (
+                    r"Software\Google\Chrome\BLBeacon",
+                    r"Software\WOW6432Node\Google\Chrome\BLBeacon",
+                ):
+                    try:
+                        key = winreg.OpenKey(root, path)
+                        version, _ = winreg.QueryValueEx(key, "version")
+                        winreg.CloseKey(key)
+                        return version
+                    except FileNotFoundError:
+                        continue
+            return None
+    except Exception:
+        return None
+
+
+def get_latest_chrome_driver_info(log_func=None):
+    """从 Chrome for Testing API 获取最新稳定版 ChromeDriver 版本和下载链接"""
+    try:
+        if log_func:
+            log_func("🔍 查询 Chrome for Testing 官方 API ...")
+        req = urllib.request.Request(
+            CFT_LAST_KNOWN_GOOD_URL,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+        data = None
+        for enc in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
+            try:
+                data = json.loads(raw.decode(enc))
+                break
+            except Exception:
+                continue
+        if data is None:
+            if log_func:
+                log_func("⚠️ Chrome for Testing API 返回内容无法解析为 JSON")
+            return None, None
+
+        stable = data.get("channels", {}).get("Stable", {})
+        version = stable.get("version")
+        downloads = stable.get("downloads", {}).get("chromedriver", [])
+
+        win64_url = None
+        for item in downloads:
+            if item.get("platform") == "win64":
+                win64_url = item.get("url")
+                break
+
+        if log_func and version:
+            log_func(f"✅ Chrome for Testing 返回最新版本: {version}")
+        return version, win64_url
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ Chrome for Testing API 请求失败: {e}")
+        return None, None
+
+
+def get_latest_edge_driver_version(browser_major_version, log_func=None):
+    """
+    获取 Edge 驱动最新版本，依次尝试：
+      1) msedgedriver.microsoft.com/LATEST_RELEASE_{major}
+      2) Edge 官方更新 API（edgeupdates.microsoft.com）
+    """
+    if not browser_major_version:
+        if log_func:
+            log_func("⚠️ 未获取到本地 Edge 主版本号")
+        return None, None
+
+    major = str(browser_major_version).split(".")[0]
+
+    def _parse_version(raw_bytes):
+        """尝试多种编码解析，返回纯版本号字符串"""
+        for enc in ("utf-8-sig", "utf-16", "utf-16-le", "utf-8", "latin-1"):
+            try:
+                text = raw_bytes.decode(enc)
+                text = text.replace("\ufeff", "").strip()
+                m = re.search(r"\d+\.\d+\.\d+\.\d+", text)
+                if m:
+                    return m.group(0)
+            except Exception:
+                continue
+        return None
+
+    # ---- 尝试 1：官方 LATEST_RELEASE 端点 ----
+    url = f"https://msedgedriver.microsoft.com/LATEST_RELEASE_{major}"
+    try:
+        if log_func:
+            log_func(f"🔍 尝试 msedgedriver.microsoft.com/LATEST_RELEASE_{major} ...")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+        version = _parse_version(raw)
+        if version:
+            if log_func:
+                log_func(f"✅ 官方端点返回最新版本: {version}")
+            download_url = EDGE_DRIVER_DOWNLOAD_URLS[0].format(version=version)
+            return version, download_url
+        else:
+            if log_func:
+                log_func(f"⚠️ 官方端点返回内容无法解析为版本号（前 40 字节: {raw[:40]!r}）")
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ 官方端点请求失败: {e}")
+
+    # ---- 尝试 2：Edge 官方更新 API ----
+    try:
+        api_url = "https://edgeupdates.microsoft.com/api/products?view=enterprise"
+        if log_func:
+            log_func("🔍 尝试 Edge 更新 API: edgeupdates.microsoft.com ...")
+        req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read()
+        data = None
+        for enc in ("utf-8-sig", "utf-8", "utf-16", "latin-1"):
+            try:
+                data = json.loads(raw.decode(enc))
+                break
+            except Exception:
+                continue
+        if data is None:
+            if log_func:
+                log_func("⚠️ Edge 更新 API 返回内容无法解析为 JSON")
+            return None, None
+
+        candidates = []
+        for product in data:
+            if not isinstance(product, dict):
+                continue
+            if product.get("Product") != "Stable":
+                continue
+            for release in product.get("Releases", []):
+                arch = str(release.get("Architecture", "")).lower()
+                if "x64" in arch:
+                    ver = release.get("ProductVersion")
+                    if ver:
+                        candidates.append(str(ver))
+
+        for ver in candidates:
+            if ver.startswith(major + "."):
+                if log_func:
+                    log_func(f"✅ Edge 更新 API 返回: {ver}")
+                download_url = EDGE_DRIVER_DOWNLOAD_URLS[0].format(version=ver)
+                return ver, download_url
+
+        if candidates:
+            ver = candidates[0]
+            if log_func:
+                log_func(f"⚠️ 未找到 {major}.x 版本，使用最新 x64 版本: {ver}")
+            download_url = EDGE_DRIVER_DOWNLOAD_URLS[0].format(version=ver)
+            return ver, download_url
+        else:
+            if log_func:
+                log_func("⚠️ Edge 更新 API 返回中没有找到 x64 稳定版")
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ Edge 更新 API 请求失败: {e}")
+
+    if log_func:
+        log_func("❌ 所有方式均无法获取 Edge 最新版本号")
+    return None, None
+
+
+def get_local_edge_browser_major():
+    """获取本地 Edge 浏览器主版本号"""
+    ver = get_local_browser_version("edge")
+    if not ver:
+        return None
+    try:
+        return str(ver).split(".")[0]
+    except Exception:
+        return None
+
+
+def download_and_extract_driver(url, driver_path, driver_exe_name):
+    """下载驱动压缩包并解压，替换原有的 exe；完成后清理所有缓存。Chrome / Edge 共用。"""
+    tmp_dir = tempfile.mkdtemp(prefix="driver_update_")
+    zip_path = os.path.join(tmp_dir, "driver.zip")
+    backup_path = driver_path + ".bak"
+
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            with open(zip_path, "wb") as f:
+                shutil.copyfileobj(resp, f)
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmp_dir)
+
+        found_exe = None
+        for root_dir, _, files in os.walk(tmp_dir):
+            if driver_exe_name in files:
+                found_exe = os.path.join(root_dir, driver_exe_name)
+                break
+
+        if not found_exe:
+            return False, "解压后未找到驱动可执行文件"
+
+        if os.path.exists(driver_path):
+            try:
+                shutil.copy2(driver_path, backup_path)
+            except Exception:
+                pass
+            os.remove(driver_path)
+
+        shutil.copy2(found_exe, driver_path)
+        return True, "更新成功"
+
+    except Exception as e:
+        return False, f"更新失败: {e}"
+    finally:
+        # ===== 缓存清理 =====
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if os.path.exists(backup_path):
+            try:
+                os.remove(backup_path)
+            except Exception:
+                pass
+        pycache_dir = os.path.join(BASE_DIR, "__pycache__")
+        if os.path.exists(pycache_dir):
+            shutil.rmtree(pycache_dir, ignore_errors=True)
+        try:
+            for name in os.listdir(BASE_DIR):
+                if name.startswith("driver_update_"):
+                    shutil.rmtree(os.path.join(BASE_DIR, name), ignore_errors=True)
+        except Exception:
+            pass
 
 
 # ========== 驱动初始化 ==========
@@ -112,9 +479,15 @@ def detect_available_browsers():
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("必应自动刷积分助手v2.0 (支持Edge/Chrome)")
-        root.geometry("500x500")
+        root.title("必应自动刷积分助手v2.2 (支持Edge/Chrome)")
+        root.geometry("540x560")
         root.resizable(False, False)
+
+        # 驱动更新状态
+        self.chrome_update_available = False
+        self.edge_update_available = False
+        self.chrome_latest_version = None
+        self.edge_latest_version = None
 
         self.status_var = tk.StringVar()
         tk.Label(root, textvariable=self.status_var, fg="blue", relief="sunken",
@@ -129,11 +502,13 @@ class App:
             default_browser = "edge" if "edge" in self.available_browsers else "chrome"
             self.browser_var = tk.StringVar(value=default_browser)
 
+        # ===== 顶部区域 =====
         top_frame = tk.Frame(root)
         top_frame.pack(pady=10, padx=10, fill="x")
 
         # 浏览器选择
-        tk.Label(top_frame, text="选择浏览器:", font=("微软雅黑", 10)).grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        tk.Label(top_frame, text="选择浏览器:", font=("微软雅黑", 10)).grid(
+            row=0, column=0, padx=5, pady=5, sticky="e")
         if self.available_browsers:
             self.browser_combo = ttk.Combobox(top_frame, textvariable=self.browser_var,
                                               values=self.available_browsers,
@@ -168,7 +543,8 @@ class App:
         custom_frame = tk.Frame(top_frame)
         custom_frame.grid(row=1, column=0, columnspan=3, pady=5)
 
-        tk.Label(custom_frame, text="自定义次数:", font=("微软雅黑", 10)).grid(row=0, column=0, padx=4, pady=4, sticky="e")
+        tk.Label(custom_frame, text="自定义次数:", font=("微软雅黑", 10)).grid(
+            row=0, column=0, padx=4, pady=4, sticky="e")
         self.custom_entry = tk.Entry(custom_frame, width=10)
         self.custom_entry.grid(row=0, column=1, padx=4, pady=4)
         self.custom_entry.insert(0, "5")
@@ -182,9 +558,38 @@ class App:
                                       width=12, bg="white")
         self.btn_dailyset.grid(row=0, column=3, padx=4, pady=4)
 
+        # ===== 驱动更新区域 =====
+        update_frame = tk.LabelFrame(root, text="驱动版本管理", font=("微软雅黑", 9),
+                                     padx=8, pady=5)
+        update_frame.pack(fill="x", padx=10, pady=(0, 5))
+
+        # Chrome 驱动行
+        tk.Label(update_frame, text="Chrome:", font=("微软雅黑", 9)).grid(
+            row=0, column=0, padx=4, pady=3, sticky="e")
+        self.chrome_version_var = tk.StringVar(value="检测中...")
+        tk.Label(update_frame, textvariable=self.chrome_version_var,
+                 font=("微软雅黑", 9), fg="gray", anchor="w", width=32).grid(
+            row=0, column=1, padx=4, pady=3, sticky="w")
+        self.btn_update_chrome = tk.Button(
+            update_frame, text="更新Chrome驱动", width=14,
+            command=self.update_chrome_driver, state="disabled")
+        self.btn_update_chrome.grid(row=0, column=2, padx=6, pady=3)
+
+        # Edge 驱动行
+        tk.Label(update_frame, text="Edge:", font=("微软雅黑", 9)).grid(
+            row=1, column=0, padx=4, pady=3, sticky="e")
+        self.edge_version_var = tk.StringVar(value="检测中...")
+        tk.Label(update_frame, textvariable=self.edge_version_var,
+                 font=("微软雅黑", 9), fg="gray", anchor="w", width=32).grid(
+            row=1, column=1, padx=4, pady=3, sticky="w")
+        self.btn_update_edge = tk.Button(
+            update_frame, text="更新Edge驱动", width=14,
+            command=self.update_edge_driver, state="disabled")
+        self.btn_update_edge.grid(row=1, column=2, padx=6, pady=3)
+
         # 日志显示
-        self.log_area = scrolledtext.ScrolledText(root, height=14, state='disabled', wrap=tk.WORD)
-        self.log_area.pack(fill="both", expand=True, padx=10, pady=10)
+        self.log_area = scrolledtext.ScrolledText(root, height=12, state='disabled', wrap=tk.WORD)
+        self.log_area.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         # ---------- 初始状态 ----------
         if not self.available_browsers:
@@ -220,6 +625,260 @@ class App:
         if not os.path.exists(DICT_PATH):
             self.log("⚠️ 警告：找不到 dictionary.txt，请创建并填入搜索词。")
 
+        # ===== 启动后台驱动版本检测 =====
+        threading.Thread(target=self.check_driver_versions, daemon=True).start()
+
+    # ---------- 日志转发工具 ----------
+    def _log_threadsafe(self, msg):
+        self.root.after(0, lambda m=msg: self.log(m))
+
+    # ---------- 驱动版本检测 ----------
+    def check_driver_versions(self):
+        """后台线程：检测 Chrome 和 Edge 驱动版本"""
+        time.sleep(0.5)
+
+        # --- Chrome ---
+        try:
+            if os.path.exists(CHROME_DRIVER_PATH):
+                local_ver = get_chrome_driver_version(CHROME_DRIVER_PATH)
+                latest_ver, _ = get_latest_chrome_driver_info(
+                    log_func=self._log_threadsafe
+                )
+
+                if local_ver and latest_ver:
+                    cmp = _compare_versions(local_ver, latest_ver)
+                    if cmp == 0:
+                        # 版本相同
+                        self.root.after(0, lambda: self.chrome_version_var.set(
+                            f"本地: {local_ver}  ✅ 已是最新"))
+                        self.root.after(0, lambda: self.btn_update_chrome.config(
+                            text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
+                    elif cmp == 1:
+                        # 本地版本高于端点返回 —— 端点延迟，不提示更新
+                        self.root.after(0, lambda: self.log(
+                            f"ℹ️ 本地 Chrome 驱动 ({local_ver}) 高于官方端点返回的版本 "
+                            f"({latest_ver})，端点可能尚未同步，跳过更新"))
+                        self.root.after(0, lambda: self.chrome_version_var.set(
+                            f"本地: {local_ver}  ✅ 已是最新（端点延迟）"))
+                        self.root.after(0, lambda: self.btn_update_chrome.config(
+                            text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
+                    else:
+                        # 本地版本低于端点返回 —— 有新版本
+                        self.chrome_update_available = True
+                        self.chrome_latest_version = latest_ver
+                        self.root.after(0, lambda: self.chrome_version_var.set(
+                            f"本地: {local_ver}  ⬆ 最新: {latest_ver}"))
+                        self.root.after(0, lambda: self.btn_update_chrome.config(
+                            text="⬆ 更新Chrome驱动", state="normal",
+                            bg="#FFA500"))
+                        self.root.after(0, lambda: self.log(
+                            f"🔄 ChromeDriver 有新版本: {local_ver} → {latest_ver}"))
+                elif not local_ver:
+                    self.root.after(0, lambda: self.chrome_version_var.set(
+                        "无法读取本地版本"))
+                elif not latest_ver:
+                    self.root.after(0, lambda v=local_ver: self.chrome_version_var.set(
+                        f"本地: {v}  (无法从官方获取最新版，详见日志)"))
+                else:
+                    self.root.after(0, lambda: self.chrome_version_var.set(
+                        f"本地: {local_ver}"))
+            else:
+                self.root.after(0, lambda: self.chrome_version_var.set(
+                    "未找到 chromedriver.exe"))
+        except Exception as e:
+            self.root.after(0, lambda e=e: self.chrome_version_var.set(
+                f"检测失败: {e}"))
+
+        # --- Edge ---
+        try:
+            if os.path.exists(EDGE_DRIVER_PATH):
+                local_driver_ver = get_edge_driver_version(EDGE_DRIVER_PATH)
+                major = get_local_edge_browser_major()
+
+                if not major:
+                    self.root.after(0, lambda: self.log(
+                        "⚠️ 无法从注册表获取本地 Edge 浏览器版本号"))
+                    self.root.after(0, lambda v=local_driver_ver: self.edge_version_var.set(
+                        f"本地驱动: {v or '未知'}  (无法检测 Edge 浏览器版本)"))
+                    return
+
+                self.root.after(0, lambda m=major: self.log(
+                    f"ℹ️ 本地 Edge 主版本号: {m}"))
+
+                latest_ver, _ = get_latest_edge_driver_version(
+                    major, log_func=self._log_threadsafe
+                )
+
+                if local_driver_ver and latest_ver:
+                    cmp = _compare_versions(local_driver_ver, latest_ver)
+                    if cmp == 0:
+                        # 版本相同
+                        self.root.after(0, lambda: self.edge_version_var.set(
+                            f"本地: {local_driver_ver}  ✅ 已是最新"))
+                        self.root.after(0, lambda: self.btn_update_edge.config(
+                            text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
+                    elif cmp == 1:
+                        # 本地版本高于端点返回 —— 端点延迟，不提示更新
+                        self.root.after(0, lambda: self.log(
+                            f"ℹ️ 本地 Edge 驱动 ({local_driver_ver}) 高于官方端点返回的版本 "
+                            f"({latest_ver})，端点可能尚未同步，跳过更新"))
+                        self.root.after(0, lambda: self.edge_version_var.set(
+                            f"本地: {local_driver_ver}  ✅ 已是最新（端点延迟）"))
+                        self.root.after(0, lambda: self.btn_update_edge.config(
+                            text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
+                    else:
+                        # 本地版本低于端点返回 —— 有新版本
+                        self.edge_update_available = True
+                        self.edge_latest_version = latest_ver
+                        self.root.after(0, lambda: self.edge_version_var.set(
+                            f"本地: {local_driver_ver}  ⬆ 最新: {latest_ver}"))
+                        self.root.after(0, lambda: self.btn_update_edge.config(
+                            text="⬆ 更新Edge驱动", state="normal",
+                            bg="#FFA500"))
+                        self.root.after(0, lambda: self.log(
+                            f"🔄 EdgeDriver 有新版本: {local_driver_ver} → {latest_ver}"))
+                elif not local_driver_ver:
+                    self.root.after(0, lambda: self.edge_version_var.set(
+                        "无法读取本地 Edge 驱动版本"))
+                elif not latest_ver:
+                    self.root.after(0, lambda v=local_driver_ver: self.edge_version_var.set(
+                        f"本地: {v}  (无法从官方获取最新版，详见日志)"))
+                else:
+                    self.root.after(0, lambda: self.edge_version_var.set(
+                        f"本地: {local_driver_ver}"))
+            else:
+                self.root.after(0, lambda: self.edge_version_var.set(
+                    "未找到 msedgedriver.exe"))
+        except Exception as e:
+            self.root.after(0, lambda e=e: self.edge_version_var.set(
+                f"检测失败: {e}"))
+
+    # ---------- 更新 Chrome 驱动 ----------
+    def update_chrome_driver(self):
+        if not self.chrome_update_available:
+            messagebox.showinfo("提示", "Chrome 驱动已是最新，无需更新。")
+            return
+
+        if not messagebox.askyesno("确认更新",
+                                   f"即将更新 ChromeDriver 到版本 {self.chrome_latest_version}，"
+                                   f"是否继续？"):
+            return
+
+        self.btn_update_chrome.config(state="disabled", text="更新中...")
+        self.log("⬇ 开始下载 ChromeDriver...")
+
+        def worker():
+            try:
+                _, win64_url = get_latest_chrome_driver_info(
+                    log_func=self._log_threadsafe
+                )
+                if not win64_url:
+                    self.root.after(0, lambda: self.log("❌ 未找到 ChromeDriver 下载链接"))
+                    self.root.after(0, lambda: self.btn_update_chrome.config(
+                        state="normal", text="⬆ 更新Chrome驱动"))
+                    return
+
+                self.root.after(0, lambda: self.log(f"📦 下载地址: {win64_url[:80]}..."))
+                self.root.after(0, lambda: self.update_status("正在更新 ChromeDriver..."))
+
+                success, msg = download_and_extract_driver(
+                    win64_url, CHROME_DRIVER_PATH, "chromedriver.exe")
+
+                if success:
+                    self.root.after(0, lambda v=self.chrome_latest_version: self.log(
+                        f"✅ ChromeDriver 已更新到 {v}，临时文件、备份和 __pycache__ 已清理"))
+                    self.root.after(0, lambda v=self.chrome_latest_version: self.chrome_version_var.set(
+                        f"本地: {v}  ✅ 已是最新"))
+                    self.root.after(0, lambda: self.btn_update_chrome.config(
+                        state="disabled", text="✅ 已是最新", bg="#E0E0E0"))
+                    self.chrome_update_available = False
+                    self.root.after(0, lambda v=self.chrome_latest_version: messagebox.showinfo(
+                        "更新完成",
+                        f"ChromeDriver 已更新到 {v}！\n"))
+                else:
+                    self.root.after(0, lambda m=msg: self.log(f"❌ {m}（缓存已清理）"))
+                    self.root.after(0, lambda: self.btn_update_chrome.config(
+                        state="normal", text="⬆ 重试更新Chrome驱动"))
+            except Exception as e:
+                self.root.after(0, lambda e=e: self.log(f"❌ 更新出错: {e}（缓存已清理）"))
+                self.root.after(0, lambda: self.btn_update_chrome.config(
+                    state="normal", text="⬆ 重试更新Chrome驱动"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- 更新 Edge 驱动 ----------
+    def update_edge_driver(self):
+        if not self.edge_update_available:
+            messagebox.showinfo("提示", "Edge 驱动已是最新，无需更新。")
+            return
+
+        if not messagebox.askyesno("确认更新",
+                                   f"即将更新 EdgeDriver 到版本 {self.edge_latest_version}，"
+                                   f"是否继续？"):
+            return
+
+        self.btn_update_edge.config(state="disabled", text="更新中...")
+        self.log("⬇ 开始下载 EdgeDriver...")
+
+        def worker():
+            try:
+                major = get_local_edge_browser_major()
+                latest_ver, first_url = get_latest_edge_driver_version(
+                    major, log_func=self._log_threadsafe
+                )
+
+                urls_to_try = []
+                if latest_ver:
+                    for tmpl in EDGE_DRIVER_DOWNLOAD_URLS:
+                        urls_to_try.append(tmpl.format(version=latest_ver))
+                elif first_url:
+                    urls_to_try.append(first_url)
+
+                if not urls_to_try:
+                    self.root.after(0, lambda: self.log(
+                        "❌ 未找到 EdgeDriver 下载链接（详见上方日志）"))
+                    self.root.after(0, lambda: self.btn_update_edge.config(
+                        state="normal", text="⬆ 更新Edge驱动"))
+                    return
+
+                self.root.after(0, lambda: self.update_status("正在更新 EdgeDriver..."))
+
+                success = False
+                last_msg = ""
+                for url in urls_to_try:
+                    self.root.after(0, lambda u=url:
+                        self.log(f"📦 尝试下载: {u[:80]}..."))
+                    success, last_msg = download_and_extract_driver(
+                        url, EDGE_DRIVER_PATH, "msedgedriver.exe")
+                    if success:
+                        break
+                    self.root.after(0, lambda m=last_msg:
+                        self.log(f"⚠️ 该源失败: {m}"))
+
+                if success:
+                    self.root.after(0, lambda v=latest_ver: self.log(
+                        f"✅ EdgeDriver 已更新到 {v}，临时文件、备份和 __pycache__ 已清理"))
+                    self.root.after(0, lambda v=latest_ver: self.edge_version_var.set(
+                        f"本地: {v}  ✅ 已是最新"))
+                    self.root.after(0, lambda: self.btn_update_edge.config(
+                        state="disabled", text="✅ 已是最新", bg="#E0E0E0"))
+                    self.edge_update_available = False
+                    self.root.after(0, lambda v=latest_ver: messagebox.showinfo(
+                        "更新完成",
+                        f"EdgeDriver 已更新到 {v}！\n"))
+                else:
+                    self.root.after(0, lambda m=last_msg:
+                        self.log(f"❌ {m}（缓存已清理）"))
+                    self.root.after(0, lambda: self.btn_update_edge.config(
+                        state="normal", text="⬆ 重试更新Edge驱动"))
+            except Exception as e:
+                self.root.after(0, lambda e=e: self.log(f"❌ 更新出错: {e}（缓存已清理）"))
+                self.root.after(0, lambda: self.btn_update_edge.config(
+                    state="normal", text="⬆ 重试更新Edge驱动"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ---------- 日志与状态 ----------
     def log(self, msg):
         self.log_area.config(state='normal')
         self.log_area.insert(tk.END, msg + "\n")
@@ -472,7 +1131,6 @@ class App:
         def daily_set_work():
             driver = None
             try:
-                # 使用 page_load_strategy='none'，所有导航立即返回，不阻塞
                 driver = init_driver(browser, headless=False, use_mobile_ua=False,
                                      page_load_strategy='none')
                 driver.get("https://rewards.bing.com/earn")
@@ -517,7 +1175,6 @@ class App:
                         driver.execute_script("arguments[0].click();", main_card)
                     time.sleep(1)
 
-                # 记录点击前所有可见搜索链接
                 def collect_visible_search_hrefs():
                     hrefs = set()
                     try:
@@ -546,15 +1203,12 @@ class App:
                 except:
                     driver.execute_script("arguments[0].click();", main_card)
 
-                # 等待1秒渲染（用户要求）
                 time.sleep(1)
 
                 # ===== 步骤4：查找点击后新出现的三个子任务链接 =====
                 self.root.after(0, lambda: self.log("🔍 正在查找展开后新增的子任务链接..."))
 
                 subtask_links = []
-
-                # 优先方案：通过 aria-controls 定位子面板
                 try:
                     panel_id = main_card.get_attribute("aria-controls")
                 except:
@@ -573,7 +1227,6 @@ class App:
                     except:
                         pass
 
-                # 备选方案：点击前后对比
                 if not subtask_links:
                     after_hrefs = collect_visible_search_hrefs()
                     new_hrefs = after_hrefs - before_hrefs
@@ -589,7 +1242,6 @@ class App:
                         except:
                             pass
 
-                # 去重并取前3个
                 unique_links = []
                 seen = set()
                 for l in subtask_links:
@@ -614,7 +1266,6 @@ class App:
 
                 # ===== 步骤5：依次点击每个子任务 =====
                 for idx in range(total):
-                    # 重新获取当前链接（避免 stale element）
                     current_links = []
                     try:
                         panel_id = main_card.get_attribute("aria-controls")
@@ -648,7 +1299,6 @@ class App:
 
                     link = current_links[idx]
 
-                    # 获取任务标题（仅用于日志显示）
                     try:
                         title = link.text.strip() or f"任务{idx+1}"
                     except:
@@ -659,7 +1309,6 @@ class App:
                     self.root.after(0, lambda i=idx, n=total:
                         self.update_status(f"正在点击 {i+1}/{n}..."))
 
-                    # 用 JS 直接点击，Selenium 不等待页面加载
                     try:
                         driver.execute_script(
                             "arguments[0].scrollIntoView({block: 'center'});"
@@ -672,7 +1321,6 @@ class App:
                             self.log(f"  ⚠️ 点击任务{i+1}异常: {e}"))
                         continue
 
-                    # ===== 严格等待1秒（用户要求，不多不少）=====
                     time.sleep(1)
 
                 self.root.after(0, lambda: self.log("✅ 每日打卡任务执行完毕！"))
@@ -696,7 +1344,7 @@ class App:
                 self.root.after(0, lambda: self.btn_dailyset.config(state="normal"))
                 self.root.after(0, lambda: self.update_status("就绪"))
 
-        threading.Thread(target=daily_set_work, daemon=True).start()
+        threading.Thread(target=day_set_work if False else daily_set_work, daemon=True).start()
 
 
 if __name__ == "__main__":
