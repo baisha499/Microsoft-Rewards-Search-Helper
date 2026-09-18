@@ -36,14 +36,11 @@ os.makedirs(USER_DATA_DIR_CHROME, exist_ok=True)
 
 DICT_PATH = os.path.join(BASE_DIR, "dictionary.txt")
 
-# Chrome for Testing JSON API
 CFT_LAST_KNOWN_GOOD_URL = (
     "https://googlechromelabs.github.io/chrome-for-testing/"
     "last-known-good-versions-with-downloads.json"
 )
 
-# Edge WebDriver 下载地址模板
-# 注意：msedgedriver.azureedge.net 已下线（DNS 无法解析），不再使用
 EDGE_DRIVER_DOWNLOAD_URLS = [
     "https://msedgedriver.microsoft.com/{version}/edgedriver_win64.zip",
 ]
@@ -51,7 +48,6 @@ EDGE_DRIVER_DOWNLOAD_URLS = [
 
 # ========== 版本号比较工具 ==========
 def _version_tuple(v):
-    """把版本号字符串转成可比较的整数元组，例如 '153.0.4234.46' -> (153, 0, 4234, 46)"""
     if not v:
         return None
     try:
@@ -64,18 +60,10 @@ def _version_tuple(v):
 
 
 def _compare_versions(a, b):
-    """
-    比较版本号 a 与 b。
-    返回 1：a > b
-    返回 0：a == b
-    返回 -1：a < b
-    返回 None：无法比较
-    """
     ta = _version_tuple(a)
     tb = _version_tuple(b)
     if ta is None or tb is None:
         return None
-    # 补零对齐长度
     length = max(len(ta), len(tb))
     ta = ta + (0,) * (length - len(ta))
     tb = tb + (0,) * (length - len(tb))
@@ -89,7 +77,6 @@ def _compare_versions(a, b):
 
 # ========== 驱动版本检测与更新 ==========
 def _run_no_window(cmd, timeout=10):
-    """在 Windows 上静默运行命令，不弹出黑框"""
     startupinfo = None
     if os.name == "nt":
         startupinfo = subprocess.STARTUPINFO()
@@ -101,7 +88,6 @@ def _run_no_window(cmd, timeout=10):
 
 
 def get_chrome_driver_version(driver_path):
-    """读取本地 ChromeDriver 版本号"""
     if not os.path.exists(driver_path):
         return None
     try:
@@ -114,7 +100,6 @@ def get_chrome_driver_version(driver_path):
 
 
 def get_edge_driver_version(driver_path):
-    """读取本地 EdgeDriver 版本号"""
     if not os.path.exists(driver_path):
         return None
     try:
@@ -127,11 +112,9 @@ def get_edge_driver_version(driver_path):
 
 
 def get_local_browser_version(browser):
-    """通过注册表读取本地安装的浏览器版本号"""
     try:
         import winreg
         if browser == "edge":
-            # 尝试 1：HKCU BLBeacon
             try:
                 key = winreg.OpenKey(
                     winreg.HKEY_CURRENT_USER,
@@ -142,7 +125,6 @@ def get_local_browser_version(browser):
                 return version
             except FileNotFoundError:
                 pass
-            # 尝试 2：HKLM EdgeUpdate 客户端信息
             try:
                 key = winreg.OpenKey(
                     winreg.HKEY_LOCAL_MACHINE,
@@ -154,7 +136,6 @@ def get_local_browser_version(browser):
                 return version
             except Exception:
                 pass
-            # 尝试 3：HKLM Edge BLBeacon
             try:
                 key = winreg.OpenKey(
                     winreg.HKEY_LOCAL_MACHINE,
@@ -185,7 +166,6 @@ def get_local_browser_version(browser):
 
 
 def get_latest_chrome_driver_info(log_func=None):
-    """从 Chrome for Testing API 获取最新稳定版 ChromeDriver 版本和下载链接"""
     try:
         if log_func:
             log_func("🔍 查询 Chrome for Testing 官方 API ...")
@@ -227,11 +207,6 @@ def get_latest_chrome_driver_info(log_func=None):
 
 
 def get_latest_edge_driver_version(browser_major_version, log_func=None):
-    """
-    获取 Edge 驱动最新版本，依次尝试：
-      1) msedgedriver.microsoft.com/LATEST_RELEASE_{major}
-      2) Edge 官方更新 API（edgeupdates.microsoft.com）
-    """
     if not browser_major_version:
         if log_func:
             log_func("⚠️ 未获取到本地 Edge 主版本号")
@@ -240,7 +215,6 @@ def get_latest_edge_driver_version(browser_major_version, log_func=None):
     major = str(browser_major_version).split(".")[0]
 
     def _parse_version(raw_bytes):
-        """尝试多种编码解析，返回纯版本号字符串"""
         for enc in ("utf-8-sig", "utf-16", "utf-16-le", "utf-8", "latin-1"):
             try:
                 text = raw_bytes.decode(enc)
@@ -252,7 +226,6 @@ def get_latest_edge_driver_version(browser_major_version, log_func=None):
                 continue
         return None
 
-    # ---- 尝试 1：官方 LATEST_RELEASE 端点 ----
     url = f"https://msedgedriver.microsoft.com/LATEST_RELEASE_{major}"
     try:
         if log_func:
@@ -273,7 +246,6 @@ def get_latest_edge_driver_version(browser_major_version, log_func=None):
         if log_func:
             log_func(f"⚠️ 官方端点请求失败: {e}")
 
-    # ---- 尝试 2：Edge 官方更新 API ----
     try:
         api_url = "https://edgeupdates.microsoft.com/api/products?view=enterprise"
         if log_func:
@@ -332,7 +304,6 @@ def get_latest_edge_driver_version(browser_major_version, log_func=None):
 
 
 def get_local_edge_browser_major():
-    """获取本地 Edge 浏览器主版本号"""
     ver = get_local_browser_version("edge")
     if not ver:
         return None
@@ -343,7 +314,6 @@ def get_local_edge_browser_major():
 
 
 def download_and_extract_driver(url, driver_path, driver_exe_name):
-    """下载驱动压缩包并解压，替换原有的 exe；完成后清理所有缓存。Chrome / Edge 共用。"""
     tmp_dir = tempfile.mkdtemp(prefix="driver_update_")
     zip_path = os.path.join(tmp_dir, "driver.zip")
     backup_path = driver_path + ".bak"
@@ -379,7 +349,6 @@ def download_and_extract_driver(url, driver_path, driver_exe_name):
     except Exception as e:
         return False, f"更新失败: {e}"
     finally:
-        # ===== 缓存清理 =====
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if os.path.exists(backup_path):
             try:
@@ -483,7 +452,6 @@ class App:
         root.geometry("540x560")
         root.resizable(False, False)
 
-        # 驱动更新状态
         self.chrome_update_available = False
         self.edge_update_available = False
         self.chrome_latest_version = None
@@ -502,11 +470,9 @@ class App:
             default_browser = "edge" if "edge" in self.available_browsers else "chrome"
             self.browser_var = tk.StringVar(value=default_browser)
 
-        # ===== 顶部区域 =====
         top_frame = tk.Frame(root)
         top_frame.pack(pady=10, padx=10, fill="x")
 
-        # 浏览器选择
         tk.Label(top_frame, text="选择浏览器:", font=("微软雅黑", 10)).grid(
             row=0, column=0, padx=5, pady=5, sticky="e")
         if self.available_browsers:
@@ -519,7 +485,6 @@ class App:
                                               values=[], state="disabled", width=12)
             self.browser_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
-        # 按钮区域（第一行：登录 + 5次 + 10次 + 20次）
         btn_frame = tk.Frame(top_frame)
         btn_frame.grid(row=0, column=2, padx=10, pady=5, sticky="e")
 
@@ -539,7 +504,6 @@ class App:
                                 command=lambda: self.start_search(20), width=6)
         self.btn_20.grid(row=0, column=3, padx=2, pady=4)
 
-        # 第二行：自定义次数 + 自定义搜索 + 每日打卡
         custom_frame = tk.Frame(top_frame)
         custom_frame.grid(row=1, column=0, columnspan=3, pady=5)
 
@@ -558,12 +522,10 @@ class App:
                                       width=12, bg="white")
         self.btn_dailyset.grid(row=0, column=3, padx=4, pady=4)
 
-        # ===== 驱动更新区域 =====
         update_frame = tk.LabelFrame(root, text="驱动版本管理", font=("微软雅黑", 9),
                                      padx=8, pady=5)
         update_frame.pack(fill="x", padx=10, pady=(0, 5))
 
-        # Chrome 驱动行
         tk.Label(update_frame, text="Chrome:", font=("微软雅黑", 9)).grid(
             row=0, column=0, padx=4, pady=3, sticky="e")
         self.chrome_version_var = tk.StringVar(value="检测中...")
@@ -575,7 +537,6 @@ class App:
             command=self.update_chrome_driver, state="disabled")
         self.btn_update_chrome.grid(row=0, column=2, padx=6, pady=3)
 
-        # Edge 驱动行
         tk.Label(update_frame, text="Edge:", font=("微软雅黑", 9)).grid(
             row=1, column=0, padx=4, pady=3, sticky="e")
         self.edge_version_var = tk.StringVar(value="检测中...")
@@ -587,11 +548,9 @@ class App:
             command=self.update_edge_driver, state="disabled")
         self.btn_update_edge.grid(row=1, column=2, padx=6, pady=3)
 
-        # 日志显示
         self.log_area = scrolledtext.ScrolledText(root, height=12, state='disabled', wrap=tk.WORD)
         self.log_area.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # ---------- 初始状态 ----------
         if not self.available_browsers:
             self.btn_login.config(state="disabled")
             self.btn_5.config(state="disabled")
@@ -625,19 +584,14 @@ class App:
         if not os.path.exists(DICT_PATH):
             self.log("⚠️ 警告：找不到 dictionary.txt，请创建并填入搜索词。")
 
-        # ===== 启动后台驱动版本检测 =====
         threading.Thread(target=self.check_driver_versions, daemon=True).start()
 
-    # ---------- 日志转发工具 ----------
     def _log_threadsafe(self, msg):
         self.root.after(0, lambda m=msg: self.log(m))
 
-    # ---------- 驱动版本检测 ----------
     def check_driver_versions(self):
-        """后台线程：检测 Chrome 和 Edge 驱动版本"""
         time.sleep(0.5)
 
-        # --- Chrome ---
         try:
             if os.path.exists(CHROME_DRIVER_PATH):
                 local_ver = get_chrome_driver_version(CHROME_DRIVER_PATH)
@@ -648,13 +602,11 @@ class App:
                 if local_ver and latest_ver:
                     cmp = _compare_versions(local_ver, latest_ver)
                     if cmp == 0:
-                        # 版本相同
                         self.root.after(0, lambda: self.chrome_version_var.set(
                             f"本地: {local_ver}  ✅ 已是最新"))
                         self.root.after(0, lambda: self.btn_update_chrome.config(
                             text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
                     elif cmp == 1:
-                        # 本地版本高于端点返回 —— 端点延迟，不提示更新
                         self.root.after(0, lambda: self.log(
                             f"ℹ️ 本地 Chrome 驱动 ({local_ver}) 高于官方端点返回的版本 "
                             f"({latest_ver})，端点可能尚未同步，跳过更新"))
@@ -663,7 +615,6 @@ class App:
                         self.root.after(0, lambda: self.btn_update_chrome.config(
                             text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
                     else:
-                        # 本地版本低于端点返回 —— 有新版本
                         self.chrome_update_available = True
                         self.chrome_latest_version = latest_ver
                         self.root.after(0, lambda: self.chrome_version_var.set(
@@ -689,7 +640,6 @@ class App:
             self.root.after(0, lambda e=e: self.chrome_version_var.set(
                 f"检测失败: {e}"))
 
-        # --- Edge ---
         try:
             if os.path.exists(EDGE_DRIVER_PATH):
                 local_driver_ver = get_edge_driver_version(EDGE_DRIVER_PATH)
@@ -712,13 +662,11 @@ class App:
                 if local_driver_ver and latest_ver:
                     cmp = _compare_versions(local_driver_ver, latest_ver)
                     if cmp == 0:
-                        # 版本相同
                         self.root.after(0, lambda: self.edge_version_var.set(
                             f"本地: {local_driver_ver}  ✅ 已是最新"))
                         self.root.after(0, lambda: self.btn_update_edge.config(
                             text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
                     elif cmp == 1:
-                        # 本地版本高于端点返回 —— 端点延迟，不提示更新
                         self.root.after(0, lambda: self.log(
                             f"ℹ️ 本地 Edge 驱动 ({local_driver_ver}) 高于官方端点返回的版本 "
                             f"({latest_ver})，端点可能尚未同步，跳过更新"))
@@ -727,7 +675,6 @@ class App:
                         self.root.after(0, lambda: self.btn_update_edge.config(
                             text="✅ 已是最新", state="disabled", bg="#E0E0E0"))
                     else:
-                        # 本地版本低于端点返回 —— 有新版本
                         self.edge_update_available = True
                         self.edge_latest_version = latest_ver
                         self.root.after(0, lambda: self.edge_version_var.set(
@@ -753,7 +700,6 @@ class App:
             self.root.after(0, lambda e=e: self.edge_version_var.set(
                 f"检测失败: {e}"))
 
-    # ---------- 更新 Chrome 驱动 ----------
     def update_chrome_driver(self):
         if not self.chrome_update_available:
             messagebox.showinfo("提示", "Chrome 驱动已是最新，无需更新。")
@@ -761,7 +707,7 @@ class App:
 
         if not messagebox.askyesno("确认更新",
                                    f"即将更新 ChromeDriver 到版本 {self.chrome_latest_version}，"
-                                   f"是否继续？"):
+                                   f"更新完成后会自动清理缓存。是否继续？"):
             return
 
         self.btn_update_chrome.config(state="disabled", text="更新中...")
@@ -794,7 +740,11 @@ class App:
                     self.chrome_update_available = False
                     self.root.after(0, lambda v=self.chrome_latest_version: messagebox.showinfo(
                         "更新完成",
-                        f"ChromeDriver 已更新到 {v}！\n"))
+                        f"ChromeDriver 已更新到 {v}\n\n"
+                        f"已清理：\n"
+                        f"  • 临时下载目录\n"
+                        f"  • .bak 旧驱动备份\n"
+                        f"  • __pycache__ 缓存"))
                 else:
                     self.root.after(0, lambda m=msg: self.log(f"❌ {m}（缓存已清理）"))
                     self.root.after(0, lambda: self.btn_update_chrome.config(
@@ -806,7 +756,6 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ---------- 更新 Edge 驱动 ----------
     def update_edge_driver(self):
         if not self.edge_update_available:
             messagebox.showinfo("提示", "Edge 驱动已是最新，无需更新。")
@@ -814,7 +763,7 @@ class App:
 
         if not messagebox.askyesno("确认更新",
                                    f"即将更新 EdgeDriver 到版本 {self.edge_latest_version}，"
-                                   f"是否继续？"):
+                                   f"更新完成后会自动清理缓存。是否继续？"):
             return
 
         self.btn_update_edge.config(state="disabled", text="更新中...")
@@ -865,7 +814,11 @@ class App:
                     self.edge_update_available = False
                     self.root.after(0, lambda v=latest_ver: messagebox.showinfo(
                         "更新完成",
-                        f"EdgeDriver 已更新到 {v}！\n"))
+                        f"EdgeDriver 已更新到 {v}\n\n"
+                        f"已清理：\n"
+                        f"  • 临时下载目录\n"
+                        f"  • .bak 旧驱动备份\n"
+                        f"  • __pycache__ 缓存"))
                 else:
                     self.root.after(0, lambda m=last_msg:
                         self.log(f"❌ {m}（缓存已清理）"))
@@ -878,7 +831,6 @@ class App:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # ---------- 日志与状态 ----------
     def log(self, msg):
         self.log_area.config(state='normal')
         self.log_area.insert(tk.END, msg + "\n")
@@ -898,7 +850,6 @@ class App:
         except ValueError:
             messagebox.showerror("错误", "请输入有效的正整数（如 1、10、50）！")
 
-    # ---------- 登录 ----------
     def login_task(self):
         if not self.available_browsers:
             messagebox.showerror("错误", "没有可用的浏览器驱动！")
@@ -1010,7 +961,6 @@ class App:
 
         threading.Thread(target=login_work, daemon=True).start()
 
-    # ---------- 搜索 ----------
     def start_search(self, count):
         if not self.available_browsers:
             messagebox.showerror("错误", "没有可用的浏览器驱动！")
@@ -1096,7 +1046,7 @@ class App:
 
     # ---------- 每日打卡 ----------
     def start_daily_set(self):
-        """打开 Rewards 页面，点击'每日连续打卡活动'主卡片，依次点击3个子任务"""
+        """打开 Rewards 页面，点击'每日连续打卡活动'主卡片展开，点击后三个子任务"""
         if not self.available_browsers:
             messagebox.showerror("错误", "没有可用的浏览器驱动！")
             return
@@ -1160,7 +1110,23 @@ class App:
 
                 self.root.after(0, lambda: self.log("✅ 已找到'每日连续打卡活动'主卡片"))
 
-                # ===== 步骤2：确保主卡片处于折叠状态 =====
+                def collect_visible_link_hrefs():
+                    hrefs = set()
+                    try:
+                        links = driver.find_elements(By.XPATH, "//a[@href]")
+                        for a in links:
+                            try:
+                                if a.is_displayed():
+                                    h = a.get_attribute("href") or ""
+                                    if h.startswith("http"):
+                                        hrefs.add(h)
+                            except:
+                                pass
+                    except:
+                        pass
+                    return hrefs
+
+                # ===== 步骤2：确保主卡片处于折叠状态，记录点击前链接 =====
                 try:
                     expanded = main_card.get_attribute("aria-expanded")
                 except:
@@ -1175,25 +1141,9 @@ class App:
                         driver.execute_script("arguments[0].click();", main_card)
                     time.sleep(1)
 
-                def collect_visible_search_hrefs():
-                    hrefs = set()
-                    try:
-                        links = driver.find_elements(
-                            By.XPATH, "//a[contains(@href, 'bing.com/search')]"
-                        )
-                        for a in links:
-                            try:
-                                if a.is_displayed():
-                                    h = a.get_attribute("href")
-                                    if h:
-                                        hrefs.add(h)
-                            except:
-                                pass
-                    except:
-                        pass
-                    return hrefs
-
-                before_hrefs = collect_visible_search_hrefs()
+                before_hrefs = collect_visible_link_hrefs()
+                self.root.after(0, lambda n=len(before_hrefs):
+                    self.log(f"ℹ️ 点击前页面可见链接数: {n}"))
 
                 # ===== 步骤3：点击主卡片展开，等待1秒 =====
                 self.root.after(0, lambda: self.log("🖱️ 正在点击主卡片展开任务列表..."))
@@ -1205,10 +1155,16 @@ class App:
 
                 time.sleep(1)
 
-                # ===== 步骤4：查找点击后新出现的三个子任务链接 =====
+                # ===== 步骤4：找出点击后新增的链接 =====
                 self.root.after(0, lambda: self.log("🔍 正在查找展开后新增的子任务链接..."))
 
-                subtask_links = []
+                after_hrefs = collect_visible_link_hrefs()
+                new_hrefs = after_hrefs - before_hrefs
+                self.root.after(0, lambda n=len(new_hrefs):
+                    self.log(f"ℹ️ 检测到 {n} 个新出现的链接"))
+
+                # 优先：从 aria-controls 子面板取
+                panel_hrefs = []
                 try:
                     panel_id = main_card.get_attribute("aria-controls")
                 except:
@@ -1217,109 +1173,90 @@ class App:
                 if panel_id:
                     try:
                         panel = driver.find_element(By.ID, panel_id)
-                        links = panel.find_elements(
-                            By.XPATH, ".//a[contains(@href, 'bing.com/search')]"
-                        )
-                        subtask_links = [l for l in links if l.is_displayed()]
-                        if subtask_links:
-                            self.root.after(0, lambda: self.log(
-                                f"✅ 通过 aria-controls 在子面板中找到 {len(subtask_links)} 个任务"))
+                        raw = panel.find_elements(By.XPATH, ".//a[@href]")
+                        for l in raw:
+                            try:
+                                if not l.is_displayed():
+                                    continue
+                                h = l.get_attribute("href") or ""
+                                if h and h not in panel_hrefs:
+                                    panel_hrefs.append(h)
+                            except:
+                                continue
+                        if panel_hrefs:
+                            self.root.after(0, lambda n=len(panel_hrefs):
+                                self.log(f"✅ 通过 aria-controls 子面板找到 {n} 个链接"))
                     except:
                         pass
 
-                if not subtask_links:
-                    after_hrefs = collect_visible_search_hrefs()
-                    new_hrefs = after_hrefs - before_hrefs
-                    self.root.after(0, lambda n=len(new_hrefs): self.log(
-                        f"ℹ️ 检测到 {n} 个新出现的搜索链接"))
-                    for a in driver.find_elements(
-                        By.XPATH, "//a[contains(@href, 'bing.com/search')]"
-                    ):
-                        try:
-                            h = a.get_attribute("href")
-                            if h and h in new_hrefs and a.is_displayed():
-                                subtask_links.append(a)
-                        except:
-                            pass
-
-                unique_links = []
-                seen = set()
-                for l in subtask_links:
+                # 组装最终 href 列表：优先用新出现的链接（按页面顺序）
+                task_hrefs = []
+                if new_hrefs:
                     try:
-                        h = l.get_attribute("href")
-                        if h and h not in seen:
-                            seen.add(h)
-                            unique_links.append(l)
-                            if len(unique_links) >= 3:
-                                break
+                        all_links = driver.find_elements(By.XPATH, "//a[@href]")
                     except:
-                        continue
+                        all_links = []
+                    for a in all_links:
+                        try:
+                            if not a.is_displayed():
+                                continue
+                            h = a.get_attribute("href") or ""
+                            if h in new_hrefs and h not in task_hrefs:
+                                task_hrefs.append(h)
+                        except:
+                            continue
 
-                if not unique_links:
+                if not task_hrefs and panel_hrefs:
+                    task_hrefs = panel_hrefs
+
+                # ===== 关键：若超过3个，跳过第一个，保留后面三个 =====
+                if len(task_hrefs) > 3:
+                    skipped = task_hrefs[0]
+                    task_hrefs = task_hrefs[1:4]
+                    self.root.after(0, lambda s=skipped: self.log(
+                        f"ℹ️ 检测到 {len(task_hrefs) + 1} 个链接，跳过第一个: {s[:80]}..."))
+                else:
+                    task_hrefs = task_hrefs[:3]
+
+                if not task_hrefs:
                     self.root.after(0, lambda: self.log("❌ 未找到每日打卡子任务链接"))
                     self.root.after(0, lambda: self.update_status("未找到打卡任务"))
                     return
 
-                total = len(unique_links)
+                total = len(task_hrefs)
                 self.root.after(0, lambda n=total: self.log(
                     f"📋 共找到 {n} 个每日打卡子任务，开始依次点击"))
 
-                # ===== 步骤5：依次点击每个子任务 =====
-                for idx in range(total):
-                    current_links = []
-                    try:
-                        panel_id = main_card.get_attribute("aria-controls")
-                    except:
-                        panel_id = None
-
-                    if panel_id:
-                        try:
-                            panel = driver.find_element(By.ID, panel_id)
-                            raw = panel.find_elements(
-                                By.XPATH, ".//a[contains(@href, 'bing.com/search')]"
-                            )
-                            seen = set()
-                            for l in raw:
-                                try:
-                                    h = l.get_attribute("href")
-                                    if h and h not in seen:
-                                        seen.add(h)
-                                        current_links.append(l)
-                                        if len(current_links) >= 3:
-                                            break
-                                except:
-                                    continue
-                        except:
-                            pass
-
-                    if idx >= len(current_links):
-                        self.root.after(0, lambda i=idx: self.log(
-                            f"⚠️ 第{i+1}个任务链接已不可用，跳过"))
-                        continue
-
-                    link = current_links[idx]
-
-                    try:
-                        title = link.text.strip() or f"任务{idx+1}"
-                    except:
-                        title = f"任务{idx+1}"
-
-                    self.root.after(0, lambda t=title, i=idx, n=total:
-                        self.log(f"🖱️ ({i+1}/{n}) 点击: {t}"))
+                # ===== 步骤5：依次点击每个子任务（不重新加载页面）=====
+                for idx, href in enumerate(task_hrefs, 1):
+                    self.root.after(0, lambda i=idx, n=total, h=href:
+                        self.log(f"🖱️ ({i}/{n}) 点击 href: {h[:80]}..."))
                     self.root.after(0, lambda i=idx, n=total:
-                        self.update_status(f"正在点击 {i+1}/{n}..."))
+                        self.update_status(f"正在点击 {i}/{n}..."))
 
                     try:
-                        driver.execute_script(
-                            "arguments[0].scrollIntoView({block: 'center'});"
-                            "arguments[0].click();",
-                            link
-                        )
-                        self.root.after(0, lambda i=idx: self.log(f"  ✅ 已点击任务 {i+1}"))
+                        clicked = driver.execute_script("""
+                            var target = arguments[0];
+                            var links = document.querySelectorAll('a[href]');
+                            for (var i = 0; i < links.length; i++) {
+                                if (links[i].href === target) {
+                                    links[i].scrollIntoView({block: 'center'});
+                                    links[i].click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        """, href)
                     except Exception as e:
                         self.root.after(0, lambda e=e, i=idx:
-                            self.log(f"  ⚠️ 点击任务{i+1}异常: {e}"))
-                        continue
+                            self.log(f"  ⚠️ 任务{i} 点击异常: {e}"))
+                        clicked = False
+
+                    if clicked:
+                        self.root.after(0, lambda i=idx: self.log(f"  ✅ 已点击任务 {i}"))
+                    else:
+                        self.root.after(0, lambda i=idx:
+                            self.log(f"  ⚠️ 任务{i} 未找到对应元素，跳过"))
 
                     time.sleep(1)
 
@@ -1344,7 +1281,7 @@ class App:
                 self.root.after(0, lambda: self.btn_dailyset.config(state="normal"))
                 self.root.after(0, lambda: self.update_status("就绪"))
 
-        threading.Thread(target=day_set_work if False else daily_set_work, daemon=True).start()
+        threading.Thread(target=daily_set_work, daemon=True).start()
 
 
 if __name__ == "__main__":
