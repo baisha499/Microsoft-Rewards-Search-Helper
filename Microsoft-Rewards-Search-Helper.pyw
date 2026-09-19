@@ -707,7 +707,7 @@ class App:
 
         if not messagebox.askyesno("确认更新",
                                    f"即将更新 ChromeDriver 到版本 {self.chrome_latest_version}，"
-                                   f"更新完成后会自动清理缓存。是否继续？"):
+                                   f"是否继续？"):
             return
 
         self.btn_update_chrome.config(state="disabled", text="更新中...")
@@ -740,11 +740,7 @@ class App:
                     self.chrome_update_available = False
                     self.root.after(0, lambda v=self.chrome_latest_version: messagebox.showinfo(
                         "更新完成",
-                        f"ChromeDriver 已更新到 {v}\n\n"
-                        f"已清理：\n"
-                        f"  • 临时下载目录\n"
-                        f"  • .bak 旧驱动备份\n"
-                        f"  • __pycache__ 缓存"))
+                        f"ChromeDriver 已更新到 {v}！\n"))
                 else:
                     self.root.after(0, lambda m=msg: self.log(f"❌ {m}（缓存已清理）"))
                     self.root.after(0, lambda: self.btn_update_chrome.config(
@@ -763,7 +759,7 @@ class App:
 
         if not messagebox.askyesno("确认更新",
                                    f"即将更新 EdgeDriver 到版本 {self.edge_latest_version}，"
-                                   f"更新完成后会自动清理缓存。是否继续？"):
+                                   f"是否继续？"):
             return
 
         self.btn_update_edge.config(state="disabled", text="更新中...")
@@ -814,11 +810,7 @@ class App:
                     self.edge_update_available = False
                     self.root.after(0, lambda v=latest_ver: messagebox.showinfo(
                         "更新完成",
-                        f"EdgeDriver 已更新到 {v}\n\n"
-                        f"已清理：\n"
-                        f"  • 临时下载目录\n"
-                        f"  • .bak 旧驱动备份\n"
-                        f"  • __pycache__ 缓存"))
+                        f"EdgeDriver 已更新到 {v}！\n"))
                 else:
                     self.root.after(0, lambda m=last_msg:
                         self.log(f"❌ {m}（缓存已清理）"))
